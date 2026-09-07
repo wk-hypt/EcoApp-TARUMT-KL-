@@ -611,7 +611,8 @@ class LoginViewModel(
                 resendSecondsLeft = secondsUntilResendAllowed()
             )
         } catch (e: Exception) {
-            val waitMessage = otpSendWaitMessage(e.message.orEmpty())
+            val raw = exceptionText(e)
+            val waitMessage = otpSendWaitMessage(raw)
             if (waitMessage != null && otpSendSucceeded) {
                 startResendCooldown()
                 forgotUiState = forgotUiState.copy(
@@ -622,7 +623,10 @@ class LoginViewModel(
                     resendSecondsLeft = secondsUntilResendAllowed()
                 )
             } else {
-                openStaffResetPath(reason = StaffResetReason.OtpFailed)
+                forgotUiState = forgotUiState.copy(
+                    isLoading = false,
+                    errorMessage = waitMessage ?: otpSendFailureMessage(raw)
+                )
             }
         }
     }
@@ -647,16 +651,48 @@ class LoginViewModel(
         return ((remaining + 999) / 1000).toInt().coerceAtLeast(0)
     }
 
+    // flatten nested exception text from supabase-kt wrappers
+    private fun exceptionText(error: Throwable): String {
+        val parts = mutableListOf<String>()
+        var current: Throwable? = error
+        val seen = mutableSetOf<Throwable>()
+        while (current != null && seen.add(current)) {
+            current.message?.let { parts += it }
+            parts += current.toString()
+            current = current.cause
+        }
+        return parts.joinToString(" ").lowercase()
+    }
+
     // parse error message for otp rate limits
     private fun otpSendWaitMessage(raw: String): String? {
         val message = raw.lowercase()
         return when {
-            message.contains("rate limit") ->
-                "The free email service only allows a few messages per hour. Use the last email if you already received one, or wait about an hour."
+            message.contains("rate limit") ||
+                    message.contains("over_email_send_rate_limit") ->
+                "Too many emails were sent. Use the last code if you already received one, or wait about an hour."
             message.contains("after 60 seconds") ||
                     message.contains("only request this after") ->
                 "Wait 60 seconds, then send again."
             else -> null
+        }
+    }
+
+    // parse smtp / mailer failures so the user can retry instead of jumping to staff
+    private fun otpSendFailureMessage(raw: String): String {
+        val message = raw.lowercase()
+        val smtpRejected = message.contains("535") ||
+            message.contains("badcredentials") ||
+            message.contains("username and password") ||
+            message.contains("authentication") ||
+            message.contains("smtp") ||
+            message.contains("unexpected_failure") ||
+            message.contains("unexpected failure") ||
+            message.contains("error sending")
+        return if (smtpRejected) {
+            "Gmail rejected the SMTP login. In Supabase SMTP, Username must be your full Gmail, Password must be a 16-character App Password (not your Gmail login), then tap Send code again."
+        } else {
+            "Could not send the code to this inbox. Try again, or tap Can't use this email?"
         }
     }
 
